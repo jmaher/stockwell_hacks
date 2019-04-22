@@ -55,13 +55,20 @@ def parseDataByDate(filename):
     return bydate
 
 
-def parseData(filename):
+def parseData(filename, test_dirs):
     data = {}
     with open(filename, 'r') as f:
         data = json.load(f)
 
     if 'oranges' not in data:
         return {}
+
+
+    bugs = {}
+    with open('bugs.json', 'r') as f:
+        bugdata = json.load(f)
+    for item in bugdata['bugs']:
+        bugs[str(item['id'])] = item
 
     bugcount = {}
     total_pushes = 0
@@ -70,16 +77,62 @@ def parseData(filename):
         stars = data['oranges'][date]['oranges']
         for item in stars:
             try:
-#                summary = data['bugs'][item['bug']]['summary']
-#                idx = summary.index('comparison')
+                # only look for devtools
+                summary = data['bugs'][item['bug']]['summary']
+                idx = summary.index('devtools')
 #                if item['platform'] != 'windows7-32':
 #                    continue
+            except Exception, e:
+                continue
+
+            try:
+                # split devtools summary to find test names
+                parts = summary.split('|')
+                if len(parts) == 1:
+                    dir = parts[0]
+                elif len(parts) == 2:
+                    dir = parts[0]
+                elif len(parts) == 3:
+                    dir = parts[1]
+                elif len(parts) == 4:
+                    dir = parts[1]
+
+                dir = dir.split('devtools/')
+                if len(dir) == 2:
+                    dir = dir[1].split(' ')[0]                    
+                else:
+                    dir = dir[0]
+                    if len(dir.split('browser_dbg')) > 1 or \
+                       len(dir.split('browser_aboutdevtools')) > 1 or \
+                       len(dir.split('browser_webconsole')) > 1:
+                       dir = dir[-1].strip().split(' ')[-1]
+#                    else:
+#                        print "ERRORX: %s: %s" % (len(dir), dir)
+
+                if dir == "Intermittent":
+                    print "ERROR: %s" % summary
+
+                if dir not in ['w3c-css/received/css-multicol-1', 'text', 'editor/reftests/xul', 'writing-mode']:
+                    try:
+                        if data['bugs'][item['bug']]['id'] not in bugs:
+                            time = "not_stockwell"
+                        else:
+                            time = bugs[data['bugs'][item['bug']]['id']]['last_change_time']
+#                        print "%s, %s, %s" % (data['bugs'][item['bug']]['id'], data['bugs'][item['bug']]['status'], time)
+                    except:
+                        pass
+
+                if dir not in test_dirs.keys():
+                    test_dirs[dir] = 0
+                test_dirs[dir] += 1
+
 
                 if item['bug'] not in bugcount:
                     bugcount[item['bug']] = 0
                 bugcount[item['bug']] += 1
 
-            except:
+            except Exception, e:
+                print "ERROR: %s, %s" % (e, dir)
                 pass
 
     priority = {}
@@ -87,19 +140,21 @@ def parseData(filename):
     total_oranges = 0
     high_oranges = 0
     for bugnumber in bugcount:
-        if bugcount[bugnumber] >= MEDIUM_FREQUENCY:
+#        if bugcount[bugnumber] >= MEDIUM_FREQUENCY:
+        if bugcount[bugnumber] >= 0:
             if bugnumber not in priority:
                 priority[bugnumber] = bugcount[bugnumber]
                 if bugcount[bugnumber] >= HIGH_FREQUENCY:
                     high_oranges += bugcount[bugnumber]
         total_oranges += bugcount[bugnumber]
 
+
     priority['high_oranges'] = high_oranges
     priority['pushes'] = total_pushes
     priority['all_of'] = (total_oranges * 1.0) / total_pushes
     priority['low_of'] = ((total_oranges - high_oranges) * 1.0) / total_pushes
     priority['all_oranges'] = total_oranges
-    return priority
+    return priority, test_dirs
 
 def mergePriority(old, new, verbose=False):
     repeat2 = 0
@@ -182,12 +237,15 @@ def parseBugzillaWhiteboards(filename):
     infra = 0
     fixedreason = {}
     components = {}
+    summaries = {}
     for item in data['bugs']:
-        try:
-            idx = item['summary'].index('image comparison')
-        except:
-            continue
+#JMAHER: reftest specific
+#        try:
+#            idx = item['summary'].index('image comparison')
+#        except:
+#            continue
 
+        summaries[item['id']] = item['summary']
         component = "%s::%s" % (item['product'], item['component'])
         if component not in components:
             components[component] = {'bugs': [], 'owner': '', 'fixed': 0, 'disabled': 0, 'infra': 0, 'needswork': 0, 'unknown': 0}
@@ -236,14 +294,31 @@ def parseBugzillaWhiteboards(filename):
 #        print "%s, %s, %s, %s, %s" % (c, components[c]['owner'], len(components[c]['bugs']), components[c]['fixed'], components[c]['disabled'])
 #    print "\n"
 
-    return whiteboards
+    return whiteboards, summaries
 
 def summarizeStockwellBugs(files, verbose=False):
-    whiteboards = parseBugzillaWhiteboards('bugs.json')
+    whiteboards, summaries = parseBugzillaWhiteboards('bugs.json')
 
     priority = {}
+    new_manifests = {}
+    manifests = {}
     for file in files:
-        priority = mergePriority(priority, parseData(file))
+        if file == '2018\\0226.json':
+            for dir in manifests:
+                new_manifests[dir] = [manifests[dir]]
+                manifests[dir] = 0
+        new_priority, manifests = parseData(file, manifests)
+        priority = mergePriority(priority, new_priority)
+
+#    for dir in manifests:
+#        if dir not in new_manifests.keys():
+#            new_manifests[dir] = [0,manifests[dir]]
+#        else:
+#            new_manifests[dir].append(manifests[dir])
+
+#    for dir in new_manifests:
+#        if abs(new_manifests[dir][0] - new_manifests[dir][1]) > 20:
+#            print "%s: %s" % (dir, new_manifests[dir])
 
     bugs = priority.keys()
     bugs.sort()
@@ -269,14 +344,18 @@ def summarizeStockwellBugs(files, verbose=False):
             continue
 
         try:
-            valid = False
+#JMAHER: hack for specific bugs 
+#            valid = False
+            verbose = True
+            valid = True
+
             for x in bug:
                 if int(x) >= HIGH_FREQUENCY:
                     valid = True
 
             if valid:
                 if whiteboard=='TODO' or verbose:
-                    print "%s,%s, %s" % (idx, whiteboard, ','.join([str(i) for i in bug]))
+                    print '%s,%s,%s' % (idx, summaries[int(idx)], ','.join([str(i) for i in bug]))
                 total_bugs += 1
                 totals[whiteboard] += 1
         except:
@@ -291,13 +370,14 @@ def summarizeStockwellBugs(files, verbose=False):
 
 
 def summarize200(files, verbose=False):
-    whiteboards = parseBugzillaWhiteboards('bugs.json')
+    whiteboards, summaries = parseBugzillaWhiteboards('bugs.json')
 
     MEDIUM_PRIORITY = 0
     priority = {}
+    manifests = {}
     for file in files:
-        priority = mergePriority(priority, parseData(file))
-#        print parseData(file)
+        new_priority, manifests = parseData(file, manifests)
+        priority = mergePriority(priority, new_priority)
 
     found = []
 #    for bug in whiteboards:
